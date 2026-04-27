@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.0.0)
-project(student_grade_calculator VERSION 1.0.0 LANGUAGES CXX)
+project(student-grade-calculator VERSION 1.0.0 LANGUAGES CXX)
 
 # Project Files
 set(
