@@ -1,7 +1,14 @@
 #include <chrono>
 #include <ctime>
+#include <format>
+#include <ostream>
 
 #include "date.hpp"
+
+std::ostream& operator<<(std::ostream& os, const Date& d) {
+    // We use std::format to create the string, then push it to the stream
+    return os << std::format("{:02}-{:02}-{}", d.month, d.day, d.year);
+}
 
 Date today() {
     auto now = std::chrono::system_clock::now();

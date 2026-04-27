@@ -1,364 +1,469 @@
 #include <cstddef>
 #include <cstdint>
-#include <ctime>
-#include <expected>
+#include <format>
+#include <functional>
 #include <iostream>
-#include <limits>
 #include <print>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
-#include "date.hpp"
+#include "book.hpp"
+#include "input.hpp"
 #include "library.hpp"
 #include "loan.hpp"
+#include "member.hpp"
 
-// ── input helpers ────────────────────────────────────────────────────────────
+constexpr static int TITLE_PADDING = 40;
 
-enum class ReadError { StreamFailed, InvalidInput, OutOfRange };
+constexpr std::string_view TREE_BRANCH = "\u251C\u2500";
+constexpr std::string_view TREE_CORNER = "\u2514\u2500";
+constexpr std::string_view EM_DASH = "\u2014";
+constexpr std::string_view FROWN = "\u2639";
 
-std::expected<int, ReadError> read_int(std::string_view prompt) {
-    int result = 0;
+struct MenuItem {
+    std::string label;
+    std::function<void()> action;
+};
 
-    std::print("{}", prompt);
-    if (!(std::cin >> result)) {
-        if (std::cin.eof() || std::cin.bad())
-            return std::unexpected(ReadError::StreamFailed);
+enum class AppState { MainMenu, BookMenu, MemberMenu, LoanMenu, Exit };
 
-        std::cin.clear();
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        return std::unexpected(ReadError::InvalidInput);
+void menu_builder(std::string_view title, const std::vector<MenuItem>& menu,
+                  AppState& current_state) {
+    std::println("\n{:=^{}}", std::format(" {} ", title), TITLE_PADDING);
+
+    for (size_t i = 0; i < menu.size(); ++i) {
+        std::println("{}. {}", i + 1, menu[i].label);
     }
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::println("{:=<{}}", "", TITLE_PADDING);
 
-    return result;
-}
+    auto choice = read_unsigned("Selection: ");
 
-std::expected<std::string, ReadError> read_line(std::string_view prompt) {
-    std::string result;
-
-    std::print("{}", prompt);
-    if (!std::getline(std::cin, result))
-        return std::unexpected(ReadError::StreamFailed);
-
-    size_t begin = result.find_first_not_of(" \t");
-    size_t end = result.find_last_not_of(" \t");
-
-    if (begin == std::string::npos) {
-        result.clear();
-        return result;
+    if (!choice.has_value()) {
+        if (choice.error() == UnsignedError::EndOfFile ||
+            choice.error() == UnsignedError::StreamFailure) {
+            current_state = AppState::Exit;
+        } else {
+            std::println(std::cerr, "Invalid input. Please try again.");
+            wait_for_enter();
+        }
+        return;
     }
 
-    result = result.substr(begin, end - begin + 1);
-    return result;
-}
+    if (choice.value() == 0) {
+        std::println(std::cerr, "Invalid choice. Out of range.");
+        wait_for_enter();
+        return;
+    }
 
-std::expected<std::string, ReadError> read_string(std::string_view prompt) {
-    while (true) {
-        auto res = read_line(prompt);
-        if (!res) return std::unexpected(res.error());
-        if (!res->empty()) return res;
-        std::println(std::cerr, "Input cannot be empty. Please try again.");
+    uint32_t index = choice.value() - 1;
+    if (index < menu.size()) {
+        menu[index].action();
+    } else {
+        std::println(std::cerr, "Invalid choice. Out of range.");
+        wait_for_enter();
     }
 }
 
-std::expected<uint32_t, ReadError> read_uint32(std::string_view prompt) {
-    auto res = read_int(prompt);
-    if (!res) return std::unexpected(res.error());
-    if (*res < 0) return std::unexpected(ReadError::OutOfRange);
-    return static_cast<uint32_t>(*res);
-}
-
-// ── date helper ──────────────────────────────────────────────────────────────
-
-enum class DateError { InvalidDate, StreamFailed };
-
-std::expected<Date, DateError> read_date(std::string_view prompt) {
-    std::println("{}", prompt);
-
-    auto ask = [](std::string_view label) -> std::expected<int, DateError> {
-        auto res = read_int(label);
-        if (!res) return std::unexpected(DateError::StreamFailed);
-        return *res;
+void main_menu(AppState& current_state) {
+    std::vector<MenuItem> menu{
+        {"Manage Books",
+         [&current_state]() { current_state = AppState::BookMenu; }},
+        {"Manage Members",
+         [&current_state]() { current_state = AppState::MemberMenu; }},
+        {"Manage Loans",
+         [&current_state]() { current_state = AppState::LoanMenu; }},
+        {"Exit", [&current_state]() { current_state = AppState::Exit; }},
     };
 
-    auto y = ask("  Year : ");
-    if (!y) return std::unexpected(y.error());
-    auto m = ask("  Month: ");
-    if (!m) return std::unexpected(m.error());
-    auto d = ask("  Day  : ");
-    if (!d) return std::unexpected(d.error());
-
-    // Validation via mktime (fixes overflow)
-    std::tm t{};
-    t.tm_year = *y - 1900;
-    t.tm_mon = *m - 1;
-    t.tm_mday = *d;
-    t.tm_isdst = -1;
-
-    if (std::mktime(&t) == -1 || t.tm_year != *y - 1900 || t.tm_mon != *m - 1 ||
-        t.tm_mday != *d) {
-        return std::unexpected(DateError::InvalidDate);
-    }
-    return Date{*y, *m, *d};
+    menu_builder("Main Menu", menu, current_state);
 }
 
-// ── handlers ─────────────────────────────────────────────────────────────────
+void book_menu(Library& library, AppState& current_state) {
+    std::vector<MenuItem> menu{
+        {"Add a Book",
+         [&library]() {
+             std::println("Please enter the following informations.");
+             auto title = read_string("Book Title: ");
+             if (!title) return;
 
-bool handle_add_member(Library& library) {
-    auto name_res = read_string("Member Name: ");
+             auto author = read_string("Book Author: ");
+             if (!author) return;
 
-    // If the stream failed (EOF/Bad), signal main to exit
-    if (!name_res) return false;
+             auto date_published = read_date("Date Published (MM-DD-YYYY): ");
+             if (!date_published) return;
 
-    auto result = library.add_member(std::move(*name_res));
-    if (!result) {
-        switch (result.error()) {
-            case AddMemberError::NameAlreadyExists:
-                std::println(
-                    std::cerr,
-                    "Error: A member with the name '{}' already exists.",
-                    *name_res);
-                break;
-        }
-        return true;  // Keep running the app
-    }
+             library.add_book(std::move(title.value()),
+                              std::move(author.value()),
+                              date_published.value());
 
-    std::println("Member added successfully.");
-    return true;
+             std::println("Successfully added the book.");
+             wait_for_enter();
+         }},
+        {"Remove a Book",
+         [&library]() {
+             auto book_id = read_unsigned("Enter Book ID: ");
+             if (!book_id) return;
+
+             auto result = library.remove_book(book_id.value());
+
+             if (!result) {
+                 switch (result.error()) {
+                     case RemoveBookError::NotFound:
+                         std::println(std::cerr,
+                                      "Error: No book found with ID #{}.",
+                                      book_id.value());
+                         break;
+                     case RemoveBookError::CurrentlyOnLoan:
+                         std::println(std::cerr,
+                                      "Error: Cannot remove. Book is currently "
+                                      "borrowed.");
+                         break;
+                 }
+             } else {
+                 std::println("Success: Book with ID #{} has been removed.",
+                              book_id.value());
+             }
+
+             wait_for_enter();
+         }},
+
+        {"Find a Book by ID",
+         [&library]() {
+             auto book_id = read_unsigned("Enter Book ID: ");
+             if (!book_id) return;
+
+             auto result = library.find_book_by_id(book_id.value());
+             if (result) {
+                 const Book& book = result.value();
+                 std::println("  Book #{}", book.id);
+                 std::println("   {}Title: {}", TREE_BRANCH, book.title);
+                 std::println("   {}Author: {}", TREE_BRANCH, book.author);
+                 std::println("   {}Date Published: {}", TREE_CORNER,
+                              book.date_published);
+                 std::println();
+             } else {
+                 std::println("Did not find a book with the ID #{}",
+                              book_id.value());
+             }
+             wait_for_enter();
+         }},
+
+        {"List all Books",
+         [&library]() {
+             const auto& books = library.list_all_books();
+
+             if (books.empty()) {
+                 std::println("There are no books in the library. {}", FROWN);
+             } else {
+                 for (const Book& book : books) {
+                     std::println("  Book #{}", book.id);
+                     std::println("   {}Title: {}", TREE_BRANCH, book.title);
+                     std::println("   {}Author: {}", TREE_BRANCH, book.author);
+                     std::println("   {}Date Published: {}", TREE_CORNER,
+                                  book.date_published);
+                     std::println();
+                 }
+             }
+             wait_for_enter();
+         }},
+
+        {"Back to Main Menu",
+         [&current_state]() { current_state = AppState::MainMenu; }},
+    };
+
+    menu_builder("Book Menu", menu, current_state);
 }
 
-bool handle_add_book(Library& library) {
-    auto title = read_string("Title : ");
-    if (!title) return false;
+void member_menu(Library& library, AppState& current_state) {
+    std::vector<MenuItem> menu{
+        {"Add a Member",
+         [&library]() {
+             auto name = read_string("Enter New Member Name: ");
+             if (!name) return;
 
-    auto author = read_string("Author: ");
-    if (!author) return false;
+             auto result = library.add_member(std::move(name.value()));
+             if (!result.has_value() &&
+                 result.error() == AddMemberError::NameAlreadyExists) {
+                 std::println(
+                     "Error: A member with the same name already exists.");
+             } else {
+                 std::println("Successfully added a new member.");
+             }
 
-    auto date = read_date("Publication date:");
-    if (!date) {
-        if (date.error() == DateError::StreamFailed) return false;
-        std::println(std::cerr, "Invalid date — book not added.");
-        return true;
-    }
+             wait_for_enter();
+         }},
+        {"Remove a Member",
+         [&library]() {
+             auto member_id = read_unsigned("Enter Member ID: ");
+             if (!member_id) return;
 
-    library.add_book(std::move(*title), std::move(*author), *date);
-    std::println("Book added successfully.");
-    return true;
+             auto result = library.remove_member(member_id.value());
+
+             if (!result) {
+                 switch (result.error()) {
+                     case RemoveMemberError::NotFound:
+                         std::println(std::cerr,
+                                      "Error: No member found with ID #{}.",
+                                      member_id.value());
+                         break;
+                     case RemoveMemberError::HasActiveLoans:
+                         std::println(std::cerr,
+                                      "Error: Cannot remove. Member has active "
+                                      "loan(s).");
+                         break;
+                 }
+             } else {
+                 std::println("Success: Member with ID #{} has been removed.",
+                              member_id.value());
+             }
+
+             wait_for_enter();
+         }},
+
+        {"Find a Member by ID",
+         [&library]() {
+             auto member_id = read_unsigned("Enter Member ID: ");
+             if (!member_id) return;
+
+             auto result = library.find_member_by_id(member_id.value());
+             if (result) {
+                 const Member& member = result.value();
+                 std::println("  Member #{}", member.id);
+                 std::println("   {}Name: {}", TREE_CORNER, member.name);
+                 std::println();
+             } else {
+                 std::println("Did not find a member with the ID #{}",
+                              member_id.value());
+             }
+             wait_for_enter();
+         }},
+
+        {"List all Members",
+         [&library]() {
+             const auto& members = library.list_all_members();
+
+             if (members.empty()) {
+                 std::println("There are no members of the library. {}", FROWN);
+             } else {
+                 for (const Member& member : members) {
+                     std::println("  Member #{}", member.id);
+                     std::println("   {}Name: {}", TREE_CORNER, member.name);
+                     std::println();
+                 }
+             }
+             wait_for_enter();
+         }},
+
+        {"Back to Main Menu",
+         [&current_state]() { current_state = AppState::MainMenu; }},
+    };
+
+    menu_builder("Member Menu", menu, current_state);
 }
 
-bool handle_list_books(Library& library) {
-    const auto& books = library.list_all_books();
-    if (books.empty()) {
-        std::println("No books in the library.");
-        return true;
-    }
+void loan_menu(Library& library, AppState& current_state) {
+    std::vector<MenuItem> menu{
+        {"Borrow a Book",
+         [&library]() {
+             std::println("Please enter the following informations.");
+             auto member_id = read_unsigned("Borrower's Member ID: ");
+             if (!member_id) return;
 
-    std::println("\n{:<6} {:<30} {:<20} {}", "ID", "Title", "Author",
-                 "Published");
-    std::println("{:-<6} {:-<30} {:-<20} {:-<10}", "", "", "", "");
-    for (const auto& b : books) {
-        std::println(
-            "{:<6} {:<30} {:<20} {:04}-{:02}-{:02}", b.id,
-            b.title.length() > 29 ? b.title.substr(0, 28) + "~" : b.title,
-            b.author.length() > 19 ? b.author.substr(0, 18) + "~" : b.author,
-            b.date_published.year, b.date_published.month,
-            b.date_published.day);
-    }
-    std::println();
-    return true;
+             std::vector<uint32_t> borrowed_books{};
+             int current_total = 0;
+             const int MAX_BOOKS = 5;
+
+             while (current_total < MAX_BOOKS) {
+                 auto book_id = read_unsigned("Book ID (0 to finish): ");
+                 if (!book_id || book_id == 0) break;
+
+                 borrowed_books.push_back(book_id.value());
+                 ++current_total;
+             }
+
+             if (borrowed_books.size() == MAX_BOOKS) {
+                 std::println("Maximum limit of {} books reached.", MAX_BOOKS);
+             }
+
+             std::println("Processing loan for {} book(s)...",
+                          borrowed_books.size());
+
+             std::vector<Loan> successful_loans{};
+
+             for (auto id : borrowed_books) {
+                 auto loan = library.borrow_book(member_id.value(), id);
+                 if (!loan.has_value()) {
+                     switch (loan.error()) {
+                         case BorrowError::MemberNotFound:
+                             std::println(
+                                 std::cerr,
+                                 "Error: Did not find a member with ID #{}.",
+                                 member_id.value());
+                             wait_for_enter();
+                             return;
+                         case BorrowError::BookNotFound:
+                             std::println(
+                                 std::cerr,
+                                 "Error: Did not find a book with ID #{}.", id);
+                             break;
+                         case BorrowError::AlreadyOnLoan:
+                             std::println(
+                                 std::cerr,
+                                 "Book #{} is already on loan. Skipping.", id);
+                             break;
+                     }
+                 } else {
+                     successful_loans.push_back(loan.value());
+                 }
+             }
+
+             for (const auto& loan : successful_loans) {
+                 std::println("  Loan: Member #{} {} Book #{}: success.",
+                              loan.member_id, EM_DASH, loan.book_id);
+                 std::println("  {}Borrow Date: {}", TREE_BRANCH,
+                              loan.borrow_date);
+                 std::println("  {}Due Date:    {}", TREE_CORNER,
+                              loan.due_date);
+             }
+
+             std::println(
+                 "\nNotice: Failure to return the book on time will incur "
+                 "a penalty.");
+
+             wait_for_enter();
+         }},
+
+        {"Return a Book",
+         [&library]() {
+             auto member_id = read_unsigned("Member ID: ");
+             if (!member_id) return;
+
+             auto book_id = read_unsigned("Book ID to return: ");
+             if (!book_id) return;
+
+             auto result =
+                 library.return_book(member_id.value(), book_id.value());
+
+             if (!result) {
+                 switch (result.error()) {
+                     case ReturnError::MemberNotFound:
+                         std::println(std::cerr,
+                                      "Error: No member found with ID #{}.",
+                                      member_id.value());
+                         break;
+                     case ReturnError::BookNotFound:
+                         std::println(std::cerr,
+                                      "Error: No book found with ID #{}.",
+                                      book_id.value());
+                         break;
+                     case ReturnError::NotOnLoan:
+                         std::println(
+                             std::cerr,
+                             "Error: Book #{} is not currently on loan.",
+                             book_id.value());
+                         break;
+                     case ReturnError::NotYourLoan:
+                         std::println(std::cerr,
+                                      "Error: Book #{} was not borrowed by "
+                                      "Member #{}.",
+                                      book_id.value(), member_id.value());
+                         break;
+                 }
+             } else {
+                 const Loan& loan = result.value();
+                 std::println("Success: Book #{} has been returned.",
+                              book_id.value());
+                 std::println("  {}Borrowed on: {}", TREE_BRANCH,
+                              loan.borrow_date);
+                 std::println("  {}Returned on: {}", TREE_CORNER,
+                              loan.return_date.value());
+             }
+
+             wait_for_enter();
+         }},
+
+        {"View Active Loans",
+         [&library]() {
+             auto loans = library.get_all_active_loans();
+
+             if (loans.empty()) {
+                 std::println("There are no active loans.");
+             } else {
+                 std::println("Active loans ({}):", loans.size());
+                 for (const Loan& loan : loans) {
+                     std::println("  Member #{} {} Book #{}", loan.member_id,
+                                  EM_DASH, loan.book_id);
+                     std::println("  {}Borrow Date: {}", TREE_BRANCH,
+                                  loan.borrow_date);
+                     std::println("  {}Due Date:    {}", TREE_CORNER,
+                                  loan.due_date);
+                     std::println();
+                 }
+             }
+
+             wait_for_enter();
+         }},
+
+        {"View Overdue Loans",
+         [&library]() {
+             auto loans = library.get_all_overdue_loans();
+
+             if (loans.empty()) {
+                 std::println("There are no overdue loans.");
+             } else {
+                 std::println("Overdue loans ({}):", loans.size());
+                 for (const Loan& loan : loans) {
+                     std::println("  Member #{} {} Book #{}", loan.member_id,
+                                  EM_DASH, loan.book_id);
+                     std::println("  {}Borrow Date: {}", TREE_BRANCH,
+                                  loan.borrow_date);
+                     std::println("  {}Due Date:    {}", TREE_CORNER,
+                                  loan.due_date);
+                     std::println();
+                 }
+             }
+
+             wait_for_enter();
+         }},
+
+        {"Back to Main Menu",
+         [&current_state]() { current_state = AppState::MainMenu; }},
+    };
+
+    menu_builder("Loan Menu", menu, current_state);
 }
-
-bool handle_list_members(Library& library) {
-    const auto& members = library.list_all_members();
-    if (members.empty()) {
-        std::println("No members registered.");
-        return true;
-    }
-
-    std::println("\n{:<6} {}", "ID", "Name");
-    std::println("{:-<6} {:-<30}", "", "");
-    for (const auto& m : members) {
-        std::println("{:<6} {}", m.id, m.name);
-    }
-    std::println();
-    return true;
-}
-
-bool handle_borrow_book(Library& library) {
-    // Show context to the user
-    handle_list_members(library);
-    auto m_res = read_uint32("Member ID (0 to cancel): ");
-    if (!m_res) return (m_res.error() != ReadError::StreamFailed);
-    if (*m_res == 0) return true;
-
-    handle_list_books(library);
-    auto b_res = read_uint32("Book ID (0 to cancel)  : ");
-    if (!b_res) return (b_res.error() != ReadError::StreamFailed);
-    if (*b_res == 0) return true;
-
-    // Attempt the domain logic
-    auto result = library.borrow_book(*m_res, *b_res);
-
-    if (!result) {
-        switch (result.error()) {
-            case BorrowError::MemberNotFound:
-                std::println(std::cerr, "Member ID {} not found.", *m_res);
-                break;
-            case BorrowError::BookNotFound:
-                std::println(std::cerr, "Book ID {} not found.", *b_res);
-                break;
-            case BorrowError::AlreadyOnLoan:
-                std::println(std::cerr, "Book is already checked out.");
-                break;
-        }
-        return true;
-    }
-
-    // Success
-    const Loan& loan = *result;
-    std::println("Success! Due date: {:04}-{:02}-{:02}", loan.due_date.year,
-                 loan.due_date.month, loan.due_date.day);
-    return true;
-}
-
-bool handle_return_book(Library& library) {
-    auto m_res = read_uint32("Member ID: ");
-    if (!m_res) return (m_res.error() != ReadError::StreamFailed);
-
-    auto b_res = read_uint32("Book ID  : ");
-    if (!b_res) return (b_res.error() != ReadError::StreamFailed);
-
-    auto result = library.return_book(*m_res, *b_res);
-    if (!result) {
-        switch (result.error()) {
-            case ReturnError::MemberNotFound:
-                std::println(std::cerr, "Member not found.");
-                break;
-            case ReturnError::BookNotFound:
-                std::println(std::cerr, "Book not found.");
-                break;
-            case ReturnError::NotOnLoan:
-                std::println(std::cerr, "This book is not currently on loan.");
-                break;
-            case ReturnError::NotYourLoan:
-                std::println(std::cerr,
-                             "This book was borrowed by someone else.");
-                break;
-        }
-        return true;
-    }
-
-    std::println("Book returned successfully.");
-    return true;
-}
-
-bool handle_active_loans(Library& library) {
-    const auto loans = library.get_all_active_loans();
-    if (loans.empty()) {
-        std::println("No active loans.");
-        return true;
-    }
-
-    std::println("\n{:<8} {:<8} {:<12} {}", "Book ID", "Mbr ID", "Borrowed",
-                 "Due");
-    std::println("{:-<8} {:-<8} {:-<12} {:-<10}", "", "", "", "");
-    for (const auto& l : loans) {
-        std::println("{:<8} {:<8} {:04}-{:02}-{:02}  {:04}-{:02}-{:02}",
-                     l.book_id, l.member_id, l.borrow_date.year,
-                     l.borrow_date.month, l.borrow_date.day, l.due_date.year,
-                     l.due_date.month, l.due_date.day);
-    }
-    std::println();
-    return true;
-}
-
-bool handle_overdue_loans(Library& library) {
-    const auto loans = library.get_all_overdue_loans();
-    if (loans.empty()) {
-        std::println("No overdue loans.");
-        return true;
-    }
-
-    std::println("\n--- Overdue loans ---");
-    for (const auto& l : loans) {
-        std::println("Book {:>4} | Member {:>4} | Due: {:04}-{:02}-{:02}",
-                     l.book_id, l.member_id, l.due_date.year, l.due_date.month,
-                     l.due_date.day);
-    }
-    std::println();
-    return true;
-}
-
-// ── menu ─────────────────────────────────────────────────────────────────────
-
-void print_menu() {
-    std::println("\n{:=^30}", "");
-    std::println("{:^30}", "Library Management");
-    std::println("{:=^30}", "");
-    std::println("1. Add member");
-    std::println("2. Add book");
-    std::println("3. List members");
-    std::println("4. List books");
-    std::println("5. Borrow a book");
-    std::println("6. Return a book");
-    std::println("7. View active loans");
-    std::println("8. View overdue loans");
-    std::println("0. Exit");
-}
-
-// ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
-    Library library;
+    Library library{};
+    AppState state = AppState::MainMenu;
 
-    while (true) {
-        print_menu();
+    std::println("{:=<{}}", "", TITLE_PADDING);
+    std::println("{:^{}}", "The Library", TITLE_PADDING);
+    std::println("{:=<{}}", "", TITLE_PADDING);
 
-        auto choice_res = read_int("Choice: ");
-        if (!choice_res) {
-            if (choice_res.error() == ReadError::StreamFailed) break;
-            std::println(std::cerr, "Invalid input. Please enter a number.");
-            continue;
-        }
-
-        int choice = *choice_res;
-        if (choice == 0) break;
-
-        bool keep_running = true;
-        switch (choice) {
-            case 1:
-                keep_running = handle_add_member(library);
+    while (state != AppState::Exit) {
+        switch (state) {
+            case AppState::MainMenu:
+                main_menu(state);
                 break;
-            case 2:
-                keep_running = handle_add_book(library);
+            case AppState::BookMenu:
+                book_menu(library, state);
                 break;
-            case 3:
-                keep_running = handle_list_members(library);
+            case AppState::MemberMenu:
+                member_menu(library, state);
                 break;
-            case 4:
-                keep_running = handle_list_books(library);
+            case AppState::LoanMenu:
+                loan_menu(library, state);
                 break;
-            case 5:
-                keep_running = handle_borrow_book(library);
-                break;
-            case 6:
-                keep_running = handle_return_book(library);
-                break;
-            case 7:
-                keep_running = handle_active_loans(library);
-                break;
-            case 8:
-                keep_running = handle_overdue_loans(library);
-                break;
-            default:
-                std::println(std::cerr, "Unknown option.");
+            case AppState::Exit:
                 break;
         }
-
-        if (!keep_running) break;
     }
 
-    std::println("Goodbye!");
+    std::println("Thank you for using the library!");
+    std::println("Exiting.");
+
     return 0;
 }
