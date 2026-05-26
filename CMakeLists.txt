@@ -5,5 +5,6 @@ project(practice-proj)
 # add_subdirectory(extern)
 
 # My own projects
+add_subdirectory(src/finance_tracker)
 add_subdirectory(src/student_grade_calculator)
 add_subdirectory(src/library_manager)

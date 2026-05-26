@@ -17,6 +17,6 @@ target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 # Enable error checking and warning as errors
 target_compile_options(${PROJECT_NAME}
     PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:${COMMON_WARNING_FLAGS} -Werror>
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:${COMMON_WARNING_FLAGS} -Werror>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
 )
